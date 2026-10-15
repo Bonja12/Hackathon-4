@@ -39,7 +39,7 @@ small{color:var(--muted);text-align:center}
   <div id="log" aria-live="polite"></div>
   <footer>
     <button id="mic" aria-label="Start gesprek">🎙</button>
-    <div id="status">Klik op de microfoon om te starten</div>
+    <div id="status">De adviseur start zo…</div>
     <form class="row" id="f"><input id="t" placeholder="Of typ je antwoord" autocomplete="off"><button>Stuur</button></form>
     <button id="reset" type="button" class="row-btn">Opnieuw beginnen</button>
     <small>Spraakherkenning loopt via je browser (Chrome stuurt audio naar Google). Wij bewaren geen audio of gesprek. Een AI kan fouten maken: vraag bij twijfel je studieadviseur.</small>
@@ -48,7 +48,7 @@ small{color:var(--muted);text-align:center}
 <script>
 const log=document.getElementById('log'),mic=document.getElementById('mic'),st=document.getElementById('status');
 const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
-let history=[],started=false,busy=false,rec=null,voice=null;
+let history=[],started=false,busy=false,rec=null,voice=null,pending=null;
 
 function add(text,cls){const d=document.createElement('div');d.className='msg '+cls;d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight}
 function pickVoice(){const v=speechSynthesis.getVoices().filter(x=>x.lang.startsWith('nl'));voice=v.find(x=>/google|online|natural/i.test(x.name))||v[0]||null}
@@ -58,7 +58,9 @@ function speak(text){
   return new Promise(res=>{
     speechSynthesis.cancel();
     const u=new SpeechSynthesisUtterance(text);u.lang='nl-NL';if(voice)u.voice=voice;u.rate=1.05;
-    u.onend=u.onerror=res;speechSynthesis.speak(u);
+    let ok=false;u.onstart=()=>{ok=true};u.onend=()=>res(true);u.onerror=()=>res(ok);
+    speechSynthesis.speak(u);
+    setTimeout(()=>{if(!ok&&!speechSynthesis.speaking)res(false)},1500);
   });
 }
 
@@ -71,10 +73,10 @@ async function ask(userText,hidden){
     if(!r.ok)throw new Error(await r.text());
     const {reply}=await r.json();
     history.push({role:'assistant',content:reply});add(reply,'');
-    st.textContent='Aan het woord…';await speak(reply);
+    st.textContent='Aan het woord…';pending=(await speak(reply))?null:reply;
   }catch(e){add('Er ging iets mis: '+e.message,'sys')}
   busy=false;mic.disabled=false;
-  if(SR&&started)listen();else st.textContent='Je bent aan de beurt';
+  if(SR&&started)listen();else st.textContent=pending?'Klik op de microfoon om te antwoorden':'Je bent aan de beurt';
 }
 
 function listen(){
@@ -87,13 +89,17 @@ function listen(){
   rec.start();
 }
 
-mic.onclick=()=>{
-  if(!started){started=true;ask('Start het gesprek.',true)}   // AI begint met transparantiezin
-  else if(rec&&mic.classList.contains('listen')){started=false;rec.stop();st.textContent='Gepauzeerd'}
-  else listen();
+mic.onclick=async()=>{
+  if(busy)return;
+  if(rec&&mic.classList.contains('listen')){started=false;rec.stop();st.textContent='Gepauzeerd';return}
+  started=true;
+  if(pending){const t=pending;pending=null;st.textContent='Aan het woord…';await speak(t)}  // browser eist een klik voor audio
+  listen();
 };
-document.getElementById('reset').onclick=()=>{speechSynthesis.cancel();if(rec)try{rec.abort()}catch(e){}history=[];started=false;busy=false;log.innerHTML='';mic.disabled=false;mic.classList.remove('listen');st.textContent='Klik op de microfoon om te starten'};
+const begin=()=>ask('Start het gesprek.',true);   // de bot begint zelf met de eerste vraag
+document.getElementById('reset').onclick=()=>{speechSynthesis.cancel();if(rec)try{rec.abort()}catch(e){}history=[];pending=null;started=false;busy=false;log.innerHTML='';mic.disabled=false;mic.classList.remove('listen');begin()};
 document.getElementById('f').onsubmit=e=>{e.preventDefault();const t=document.getElementById('t');if(t.value.trim()){started=started;ask(t.value.trim());t.value=''}};
+begin();
 </script>
 </body>
 </html>
