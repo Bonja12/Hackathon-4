@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="nl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Minor-adviseur</title>
+<style>
+:root{--bg:#eef1f6;--ink:#14213d;--muted:#5b6785;--card:#fff;--line:#d5dbe8;--sig:#d62839;--me:#14213d;--me-ink:#fff}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1626;--ink:#e8ecf6;--muted:#97a3c2;--card:#18233b;--line:#2a3857;--me:#e8ecf6;--me-ink:#0f1626}}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:flex;flex-direction:column;align-items:center;background:var(--bg);color:var(--ink);font:17px/1.5 "Segoe UI",system-ui,sans-serif}
+main{width:100%;max-width:640px;flex:1;display:flex;flex-direction:column;padding:28px 18px}
+h1{font-size:1.6rem;margin:0 0 4px;letter-spacing:-.02em}
+.sub{color:var(--muted);margin:0 0 20px;font-size:.95rem}
+#log{flex:1;display:flex;flex-direction:column;gap:10px;overflow-y:auto;padding-bottom:12px}
+.msg{max-width:85%;padding:10px 14px;border-radius:14px;background:var(--card);border:1px solid var(--line)}
+.msg.me{align-self:flex-end;background:var(--me);color:var(--me-ink);border-color:var(--me)}
+.msg.sys{align-self:center;color:var(--muted);background:none;border:none;font-size:.9rem}
+footer{display:flex;flex-direction:column;align-items:center;gap:10px;padding-top:16px}
+#mic{width:84px;height:84px;border-radius:50%;border:none;background:var(--sig);color:#fff;font-size:34px;cursor:pointer;transition:transform .15s,box-shadow .15s}
+#mic:focus-visible{outline:3px solid var(--ink);outline-offset:3px}
+#mic.listen{transform:scale(1.08);box-shadow:0 0 0 10px color-mix(in srgb,var(--sig) 25%,transparent)}
+#mic:disabled{opacity:.5;cursor:default}
+#status{color:var(--muted);font-size:.9rem;min-height:1.3em}
+.row{display:flex;gap:8px;width:100%}
+input{flex:1;padding:10px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit}
+.row button{padding:10px 16px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--ink);font:inherit;cursor:pointer}
+small{color:var(--muted);text-align:center}
+@media (prefers-reduced-motion:reduce){#mic{transition:none}}
+</style>
+</head>
+<body>
+<main>
+  <h1>Minor-adviseur</h1>
+  <p class="sub">Praat met de AI-studieadviseur en ontdek welke minor bij je past.</p>
+  <div id="log" aria-live="polite"></div>
+  <footer>
+    <button id="mic" aria-label="Start gesprek">🎙</button>
+    <div id="status">Klik op de microfoon om te starten</div>
+    <form class="row" id="f"><input id="t" placeholder="Of typ je antwoord" autocomplete="off"><button>Stuur</button></form>
+    <small>Gesprekken worden niet opgeslagen. Deel geen achternaam of studentnummer. Dit is een AI, geen mens.</small>
+  </footer>
+</main>
+<script>
+const log=document.getElementById('log'),mic=document.getElementById('mic'),st=document.getElementById('status');
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+let history=[],started=false,busy=false,rec=null,voice=null;
+
+function add(text,cls){const d=document.createElement('div');d.className='msg '+cls;d.textContent=text;log.appendChild(d);log.scrollTop=log.scrollHeight}
+function pickVoice(){const v=speechSynthesis.getVoices().filter(x=>x.lang.startsWith('nl'));voice=v.find(x=>/google|online|natural/i.test(x.name))||v[0]||null}
+speechSynthesis.onvoiceschanged=pickVoice;pickVoice();
+
+function speak(text){
+  return new Promise(res=>{
+    speechSynthesis.cancel();
+    const u=new SpeechSynthesisUtterance(text);u.lang='nl-NL';if(voice)u.voice=voice;u.rate=1.05;
+    u.onend=u.onerror=res;speechSynthesis.speak(u);
+  });
+}
+
+async function ask(userText,hidden){
+  if(busy)return;busy=true;mic.disabled=true;st.textContent='Even denken…';
+  if(!hidden)add(userText,'me');
+  history.push({role:'user',content:userText});
+  try{
+    const r=await fetch('/chat',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({messages:history})});
+    if(!r.ok)throw new Error(await r.text());
+    const {reply}=await r.json();
+    history.push({role:'assistant',content:reply});add(reply,'');
+    st.textContent='Aan het woord…';await speak(reply);
+  }catch(e){add('Er ging iets mis: '+e.message,'sys')}
+  busy=false;mic.disabled=false;
+  if(SR&&started)listen();else st.textContent='Je bent aan de beurt';
+}
+
+function listen(){
+  if(!SR){st.textContent='Spraakherkenning werkt alleen in Chrome of Edge. Typ je antwoord.';return}
+  rec=new SR();rec.lang='nl-NL';rec.interimResults=false;rec.maxAlternatives=1;
+  rec.onstart=()=>{mic.classList.add('listen');st.textContent='Ik luister…'};
+  rec.onend=()=>mic.classList.remove('listen');
+  rec.onresult=e=>ask(e.results[0][0].transcript);
+  rec.onerror=e=>{mic.classList.remove('listen');st.textContent=e.error==='no-speech'?'Niets gehoord. Klik op de microfoon.':'Microfoonfout: '+e.error;started=false};
+  rec.start();
+}
+
+mic.onclick=()=>{
+  if(!started){started=true;ask('Start het gesprek.',true)}   // AI begint met transparantiezin
+  else if(rec&&mic.classList.contains('listen')){started=false;rec.stop();st.textContent='Gepauzeerd'}
+  else listen();
+};
+document.getElementById('f').onsubmit=e=>{e.preventDefault();const t=document.getElementById('t');if(t.value.trim()){started=started;ask(t.value.trim());t.value=''}};
+</script>
+</body>
+</html>
