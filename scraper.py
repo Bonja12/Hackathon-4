@@ -1,61 +1,85 @@
-"""Haalt minoren van kiesopmaat.nl en slaat ze op in minors.json.
+"""Haalt ALLE modules/minoren van kiesopmaat.nl op met een echte browser (Playwright)
+en slaat ze op in minors.json.
 
-LET OP: de CSS-selectors hieronder zijn een eerste gok. Open kiesopmaat.nl in je browser,
-rechtermuisklik > Inspecteren, en pas SELECTORS aan op de echte HTML.
-Check ook de robots.txt / gebruiksvoorwaarden en scrape rustig (sleep).
+Eenmalig installeren:
+    pip install playwright beautifulsoup4
+    python -m playwright install chromium
+
+Gebruik:
+    python scraper.py                      # alles (~150 pagina's, een paar minuten)
+    python scraper.py "<URL met filter>"   # optioneel: alleen een gefilterd aanbod
 """
-import json, time, requests
+import json, re, sys, time
+from urllib.parse import urlparse, parse_qs, urlencode, urlunparse, urljoin
 from bs4 import BeautifulSoup
+from playwright.sync_api import sync_playwright
 
 BASE = "https://www.kiesopmaat.nl"
-LIST_URL = f"{BASE}/minoren"  # TODO: controleer de echte lijst-URL (evt. met filter op Hogeschool Utrecht)
-MAX_MINOREN = 40              # subset voor de PoC
+START_URL = sys.argv[1] if len(sys.argv) > 1 else f"{BASE}/modules/"
+MAX_PAGES = 300          # veiligheidslimiet
+ONLY_MINOR = False       # True = alleen titels die met "Minor" beginnen
+HEADLESS = True          # zet op False als de site headless blokkeert
 
-SELECTORS = {
-    "links": "a[href*='/minor']",      # links naar detailpagina's
-    "titel": "h1",
-    "beschrijving": "main p",
-    "meta": "dl, .meta, .kenmerken",   # ECTS, periode, taal, niveau, etc.
-}
+def page_url(url, n):
+    if n == 1:
+        return url
+    p = urlparse(url)
+    q = parse_qs(p.query)
+    q["page"] = [str(n)]
+    return urlunparse(p._replace(query=urlencode(q, doseq=True)))
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (studieproject Hogeschool Utrecht)"}
-
-def soup(url):
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return BeautifulSoup(r.text, "html.parser")
+def parse(html):
+    soup = BeautifulSoup(html, "html.parser")
+    items = []
+    for li in soup.select("li"):
+        a = li.find("a", href=re.compile(r"/modules/"))
+        if not a or "page=" in a["href"]:
+            continue
+        text = li.get_text("\n", strip=True)
+        ec = re.search(r"([\d.,]+)\s*EC", text)
+        if not ec:
+            continue
+        titel = a.get_text(strip=True)
+        lines = [l for l in text.split("\n") if l and l != titel and not re.fullmatch(r"[\d.,]+\s*EC", l)]
+        periodes = [l for l in lines if " t/m " in l]
+        beschrijving = max((l for l in lines if l not in periodes), key=len, default="")
+        items.append({"titel": titel, "ec": ec.group(1), "beschrijving": beschrijving,
+                      "periodes": periodes, "url": urljoin(BASE, a["href"])})
+    return items
 
 def main():
-    links = []
-    for a in soup(LIST_URL).select(SELECTORS["links"]):
-        href = a.get("href", "")
-        url = href if href.startswith("http") else BASE + href
-        if url not in links:
-            links.append(url)
-    links = links[:MAX_MINOREN]
-
-    minors = []
-    for i, url in enumerate(links, 1):
-        try:
-            s = soup(url)
-            titel = s.select_one(SELECTORS["titel"])
-            minors.append({
-                "id": i,
-                "titel": titel.get_text(strip=True) if titel else "",
-                "beschrijving": " ".join(p.get_text(" ", strip=True)
-                                         for p in s.select(SELECTORS["beschrijving"]))[:600],
-                "kenmerken": " | ".join(m.get_text(" ", strip=True)
-                                        for m in s.select(SELECTORS["meta"]))[:300],
-                "url": url,
-            })
-            print(f"[{i}/{len(links)}] {minors[-1]['titel']}")
-        except Exception as e:
-            print("Fout bij", url, e)
-        time.sleep(1)
+    minors, seen = [], set()
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=HEADLESS)
+        page = browser.new_context(locale="nl-NL").new_page()
+        for n in range(1, MAX_PAGES + 1):
+            url = page_url(START_URL, n)
+            page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            try:  # de site toont eerst een "Verifying your browser"-check (Anubis); wacht tot die klaar is
+                page.wait_for_function("!document.title.includes('Verifying')", timeout=60000)
+                page.wait_for_load_state("domcontentloaded")
+            except Exception:
+                print("Browsercheck is niet geslaagd. Zet HEADLESS = False en probeer opnieuw.")
+                break
+            page.wait_for_timeout(1000)
+            items = parse(page.content())
+            new = [i for i in items if i["url"] not in seen]
+            print(f"pagina {n}: {len(items)} modules ({len(new)} nieuw)")
+            if not new:
+                if n == 1:
+                    print("Titel:", page.title(), "| controleer of de pagina echt geladen is")
+                break
+            for i in new:
+                seen.add(i["url"])
+                if not ONLY_MINOR or i["titel"].lower().startswith("minor"):
+                    i["id"] = len(minors) + 1
+                    minors.append(i)
+            time.sleep(2)  # rustig aan: we belasten de site zo weinig mogelijk
+        browser.close()
 
     with open("minors.json", "w", encoding="utf-8") as f:
         json.dump(minors, f, ensure_ascii=False, indent=2)
-    print(f"Klaar: {len(minors)} minoren opgeslagen in minors.json")
+    print(f"Klaar: {len(minors)} modules opgeslagen in minors.json")
 
 if __name__ == "__main__":
     main()
